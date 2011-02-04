@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Stand-alone LDAP Daemon (slapd)
 #
@@ -16,11 +16,16 @@
 #       script found in Debian GNU/Linux 6.0.
 #
 # OCF parameters:
-#   OCF_RESKEY_binary
+#   OCF_RESKEY_slapd
+#   OCF_RESKEY_ldapsearch
 #   OCF_RESKEY_config_file
 #   OCF_RESKEY_user
 #   OCF_RESKEY_group
 #   OCF_RESKEY_services
+#   OCF_RESKEY_watch_suffix
+#   OCF_RESKEY_ignore_suffix
+#   OCF_RESKEY_bind_dn
+#   OCF_RESKEY_password
 #   OCF_RESKEY_parameters
 #
 ################################################################################
@@ -30,11 +35,16 @@
 : ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/resource.d/heartbeat}
 . ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
 
-: ${OCF_RESKEY_binary="/usr/sbin/slapd"}
+: ${OCF_RESKEY_slapd="/usr/sbin/slapd"}
+: ${OCF_RESKEY_ldapsearch="/usr/bin/ldapsearch"}
 : ${OCF_RESKEY_config_file=""}
 : ${OCF_RESKEY_user=""}
 : ${OCF_RESKEY_group=""}
-: ${OCF_RESKEY_services=""}
+: ${OCF_RESKEY_services="ldap:///"}
+: ${OCF_RESKEY_watch_suffix=""}
+: ${OCF_RESKEY_ignore_suffix=""}
+: ${OCF_RESKEY_bind_dn=""}
+: ${OCF_RESKEY_password=""}
 : ${OCF_RESKEY_parameters=""}
 
 USAGE="Usage: $0 {start|stop|status|monitor|validate-all|meta-data}"
@@ -63,13 +73,22 @@ Resource script for Stand-alone LDAP Daemon (slapd). It manages a slapd instance
 
 <parameters>
 
-<parameter name="binary" unique="0" required="0">
+<parameter name="slapd" unique="0" required="0">
 <longdesc lang="en">
 Full path to the slapd binary.
 For example, "/usr/sbin/slapd".
 </longdesc>
 <shortdesc lang="en">Full path to slapd binary</shortdesc>
 <content type="string" default="/usr/sbin/slapd" />
+</parameter>
+
+<parameter name="ldapsearch" unique="0" required="0">
+<longdesc lang="en">
+Full path to the ldapsearch binary.
+For example, "/usr/bin/ldapsearch".
+</longdesc>
+<shortdesc lang="en">Full path to slapd binary</shortdesc>
+<content type="string" default="/usr/bin/ldapsearch" />
 </parameter>
 
 <parameter name="config_file" required="0" unique="1">
@@ -105,6 +124,44 @@ For example, "ldap://127.0.0.1:389 ldaps:/// ldapi:///"
 </longdesc>
 <shortdesc>LDAP (and other scheme) URLs to serve</shortdesc>
 <content type="string" default="ldap:///"/>
+</parameter>
+
+<parameter name="watch_suffix" required="0" unique="1">
+<longdesc lang="en">
+Suffix (database backend) that will be monitored for availability. Multiple
+suffixes can be specified by providing a space seperated list. By providing one
+or more suffixes here, the ignore_suffix parameter is discarded. All suffixes
+will be monitored if left blank.
+</longdesc>
+<shortdesc>Suffix that will be monitored for availability.</shortdesc>
+<content type="string" default=""/>
+</parameter>
+
+<parameter name="ignore_suffix" required="0" unique="1">
+<longdesc lang="en">
+Suffix (database backend) that will not be monitored for availability. Multiple
+suffixes can be specified by providing a space seperated list. No suffix will
+be excluded if left blank.
+</longdesc>
+<shortdesc>Suffix that will not be monitored for availability.</shortdesc>
+<content type="string" default=""/>
+</parameter>
+
+<parameter name="bind_dn" required="0" unique="1">
+<longdesc lang="en">
+Distinguished Name used to bind to the LDAP directory. Leave blank to bind to
+the LDAP directory anonymously.
+</longdesc>
+<shortdesc>Distinguished Name used to bind to the LDAP directory.</shortdesc>
+<content type="string" default=""/>
+</parameter>
+
+<parameter name="password" required="0" unique="1">
+<longdesc lang="en">
+Password used to bind to the LDAP directory.
+</longdesc>
+<shortdesc>Password used to bind to the LDAP directory.</shortdesc>
+<content type="string" default=""/>
 </parameter>
 
 <parameter name="parameters" unique="0" required="0">
@@ -165,6 +222,27 @@ terminate()
   return 1
 }
 
+watch_suffix()
+{
+  local result
+
+  if [ -n "$OFC_RESKEY_watch_suffix" ]; then
+    if echo "'$OCF_RESKEY_watch_suffix'" | grep "'$1'" >/dev/null 2>&1; then
+      result=0
+    else
+      result=1
+    fi
+  else
+    if echo "'$OCF_RESKEY_ignore_suffix'" | grep "'$1'" >/dev/null 2>&1; then
+      result=1
+    else
+      result=0
+    fi
+  fi
+
+  return $result
+}
+
 slapd_pid()
 {
   local pid
@@ -178,12 +256,10 @@ slapd_pid()
     fi
 
     ocf_log err "slapd pid file '$pid_file' empty."
-
     return $OCF_ERR_GENERIC
   fi
 
   ocf_log info "slapd pid file '$pid_file' does not exist."
-
   return $OCF_NOT_RUNNING
 }
 
@@ -238,9 +314,9 @@ slapd_start()
   fi
 
   if [ -n "$services" ]; then
-    $binary -h "$services" $options 2>&1; result=$?
+    $slapd -h "$services" $options 2>&1; result=$?
   else
-    $binary $options 2>&1; result=$?
+    $slapd $options 2>&1; result=$?
   fi
 
   if [ $result -ne 0 ]; then
@@ -290,26 +366,100 @@ slapd_stop()
   return $OCF_SUCCESS
 }
 
+slapd_monitor()
+{
+  local options
+  local pid
+  local result
+  local state
+  local suffix
+  local suffixes
+
+  pid=`slapd_status`; state=$?
+  if [ $state -eq $OCF_NOT_RUNNING ]; then
+    ocf_log debug "slapd is stopped."
+    return $state
+  elif [ $state -ne $OCF_SUCCESS ]; then
+    ocf_log err "slapd returned error."
+    return $state
+  fi
+
+  if [ -d "$config_file" ]; then
+    for suffix in `find "$config_file"/'cn=config' -type f -name olcDatabase* -exec \
+                   sed -ne 's/^[[:space:]]*olcSuffix:[[:space:]]\+\(.\+\)/\1/p' {} \;`
+    do
+      suffix=${suffix#\"*}
+      suffix=${suffix%\"*}
+
+      if watch_suffix $suffix; then
+        suffixes="$suffixes $suffix"
+      fi
+    done
+
+  elif [ -f "$config_file" ]; then
+    for suffix in `sed -ne 's/^[[:space:]]*suffix[[:space:]]\+\(.\+\)/\1/p' "$config_file"`
+    do
+      suffix=${suffix#\"*}
+      suffix=${suffix%\"*}
+
+      if watch_suffix $suffix; then
+        suffixes="$suffixes $suffix"
+      fi
+    done
+  fi
+
+  options="-LLL -s base -x"
+
+  if [ -n "$bind_dn" ]; then
+    options="$options -D '$bind_dn' -w '$password'"
+  fi
+
+  for suffix in $suffixes; do
+    ldapsearch -H "$services" -b "$suffix" $options >/dev/null 2>&1; result=$?
+
+    case "$result" in
+      "0")
+        ocf_log debug "slapd database with suffix '$suffix' reachable"
+        ;;
+      "49")
+        ocf_log err "slapd database with suffix '$suffic' unreachable. Invalid credentials."
+        return $OCF_ERR_CONFIGURED
+        ;;
+      *)
+        ocf_log err "slapd database with suffix '$suffix' unreachable."
+        state=$OCF_ERR_GENERIC
+        ;;
+    esac
+  done
+
+  return $state
+}
+
 slapd_validate_all()
 {
-  if [ ! -x $binary ]; then
-    ocf_log err "slapd binary '$binary' does not exist or cannot be executed."
-    return $OCF_ERR_GENERIC
+  if [ ! -x $slapd ]; then
+    ocf_log err "slapd binary '$slapd' does not exist or cannot be executed."
+    return $OCF_ERR_INSTALLED
+  fi
+
+  if [ ! -x $ldapsearch ]; then
+    ocf_log err "slapd binary '$ldapsearch' does not exist or cannot be executed."
+    return $OCF_ERR_INSTALLED
   fi
 
   if [ ! -d $config_file ] && [ ! -f $config_file ]; then
     ocf_log err "slapd configuration file '$config_file' does not exist."
-    return $OCF_ERR_GENERIC
+    return $OCF_ERR_INSTALLED
   fi
 
   if ! id "$user" >/dev/null 2>&1; then
     ocf_log err "slapd user '$user' does not exist $ret"
-    return $OCF_ERR_GENERIC
+    return $OCF_ERR_INSTALLED
   fi
 
   if ! grep "^$group:" /etc/group >/dev/null 2>&1; then
     ocf_log err "slapd group '$group' does not exist"
-    return $OCF_ERR_GENERIC
+    return $OCF_ERR_INSTALED
   fi
 
   return $OCF_SUCCESS
@@ -403,11 +553,14 @@ slapd_validate_dirs()
 # Main
 #
 
-binary=$OCF_RESKEY_binary
+slapd=$OCF_RESKEY_slapd
+ldapsearch=$OCF_RESKEY_ldapsearch
 config_file=$OCF_RESKEY_config_file
 user=$OCF_RESKEY_user
 group=$OCF_RESKEY_group
 services=$OCF_RESKEY_services
+bind_dn=$OCF_RESKEY_bind_dn
+password=$OCF_RESKEY_password
 parameters=$OCF_RESKEY_parameters
 pid_file=''
 
@@ -463,13 +616,13 @@ slapd_validate_all
 [ $? -eq $OCF_SUCCESS ] || exit $?
 
 case $1 in
-  monitor|status)
+  status)
     pid=`slapd_status`; state=$?
 
     if [ $state -eq $OCF_SUCCESS ]; then
-      ocf_log info "slapd is running."
+      ocf_log debug "slapd is running."
     elif [ $state -eq $OCF_NOT_RUNNING ]; then
-      ocf_log info "slapd is stopped."
+      ocf_log debug "slapd is stopped."
     fi
 
     exit $state
@@ -480,6 +633,10 @@ case $1 in
     ;;
   stop)
     slapd_stop
+    exit $?
+    ;;
+  monitor)
+    pid=`slapd_monitor`; state=$?
     exit $?
     ;;
   validate-all)
