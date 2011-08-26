@@ -250,7 +250,7 @@ slapd_pid()
   if [ -f "$pid_file" ]; then
     pid=`head -n 1 "$pid_file" 2>/dev/null`
 
-    if [ -n "$pid" ]; then
+    if [ "X$pid" != "X" ]; then
       echo "$pid"
       return $OCF_SUCCESS
     fi
@@ -637,7 +637,7 @@ case $1 in
     ;;
   monitor)
     pid=`slapd_monitor`; state=$?
-    exit $?
+    exit $state
     ;;
   validate-all)
     slapd_validate_dirs
