@@ -5,7 +5,9 @@
 # Description:  Manages Stand-alone LDAP Daemon (slapd) as an OCF resource in
 #               an high-availability setup.
 #
-# Author:       Jeroen Koekkoek
+# Authors:      Jeroen Koekkoek
+#               nozawat@gmail.com
+#
 # License:      GNU General Public License (GPL)
 # Copyright:    (C) 2011 Pagelink B.V.
 #
@@ -87,7 +89,7 @@ For example, "/usr/sbin/slapd".
 Full path to the ldapsearch binary.
 For example, "/usr/bin/ldapsearch".
 </longdesc>
-<shortdesc lang="en">Full path to slapd binary</shortdesc>
+<shortdesc lang="en">Full path to ldapsearch binary</shortdesc>
 <content type="string" default="/usr/bin/ldapsearch" />
 </parameter>
 
@@ -226,7 +228,7 @@ watch_suffix()
 {
   local result
 
-  if [ -n "$OFC_RESKEY_watch_suffix" ]; then
+  if [ -n "$OCF_RESKEY_watch_suffix" ]; then
     if echo "'$OCF_RESKEY_watch_suffix'" | grep "'$1'" >/dev/null 2>&1; then
       result=0
     else
@@ -415,7 +417,7 @@ slapd_monitor()
   fi
 
   for suffix in $suffixes; do
-    ldapsearch -H "$services" -b "$suffix" $options >/dev/null 2>&1; result=$?
+    ocf_run ldapsearch -H "$services" -b "$suffix" $options >/dev/null 2>&1; result=$?
 
     case "$result" in
       "0")
