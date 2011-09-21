@@ -7,6 +7,7 @@
 #
 # Authors:      Jeroen Koekkoek
 #               nozawat@gmail.com
+#               John Keith Hohm
 #
 # License:      GNU General Public License (GPL)
 # Copyright:    (C) 2011 Pagelink B.V.
@@ -20,7 +21,7 @@
 # OCF parameters:
 #   OCF_RESKEY_slapd
 #   OCF_RESKEY_ldapsearch
-#   OCF_RESKEY_config_file
+#   OCF_RESKEY_config
 #   OCF_RESKEY_user
 #   OCF_RESKEY_group
 #   OCF_RESKEY_services
@@ -29,6 +30,7 @@
 #   OCF_RESKEY_bind_dn
 #   OCF_RESKEY_password
 #   OCF_RESKEY_parameters
+#   OCF_RESKEY_stop_escalate
 #
 ################################################################################
 
@@ -38,8 +40,8 @@
 . ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
 
 : ${OCF_RESKEY_slapd="/usr/sbin/slapd"}
-: ${OCF_RESKEY_ldapsearch="/usr/bin/ldapsearch"}
-: ${OCF_RESKEY_config_file=""}
+: ${OCF_RESKEY_ldapsearch="ldapsearch"}
+: ${OCF_RESKEY_config=""}
 : ${OCF_RESKEY_user=""}
 : ${OCF_RESKEY_group=""}
 : ${OCF_RESKEY_services="ldap:///"}
@@ -48,6 +50,7 @@
 : ${OCF_RESKEY_bind_dn=""}
 : ${OCF_RESKEY_password=""}
 : ${OCF_RESKEY_parameters=""}
+: ${OCF_RESKEY_stop_escalate=30}
 
 USAGE="Usage: $0 {start|stop|status|monitor|validate-all|meta-data}"
 ORIG_IFS=$IFS
@@ -90,10 +93,10 @@ Full path to the ldapsearch binary.
 For example, "/usr/bin/ldapsearch".
 </longdesc>
 <shortdesc lang="en">Full path to ldapsearch binary</shortdesc>
-<content type="string" default="/usr/bin/ldapsearch" />
+<content type="string" default="ldapsearch" />
 </parameter>
 
-<parameter name="config_file" required="0" unique="1">
+<parameter name="config" required="0" unique="1">
 <longdesc lang="en">
 Full path to a slapd configuration directory or a slapd configuration file.
 For example, "/etc/ldap/slapd.d" or "/etc/ldap/slapd.conf".
@@ -102,7 +105,7 @@ For example, "/etc/ldap/slapd.d" or "/etc/ldap/slapd.conf".
 <content type="string" default=""/>
 </parameter>
 
-<parameter name="user" unique="1" required="0">
+<parameter name="user" unique="0" required="0">
 <longdesc lang="en">
 User name or id slapd will run with. The group id is also changed to this
 user's gid, unless the group parameter is used to override.
@@ -111,7 +114,7 @@ user's gid, unless the group parameter is used to override.
 <content type="string" default="" />
 </parameter>
 
-<parameter name="group" unique="1" required="0">
+<parameter name="group" unique="0" required="0">
 <longdesc lang="en">
 Group name or id slapd will run with.
 </longdesc>
@@ -128,7 +131,7 @@ For example, "ldap://127.0.0.1:389 ldaps:/// ldapi:///"
 <content type="string" default="ldap:///"/>
 </parameter>
 
-<parameter name="watch_suffix" required="0" unique="1">
+<parameter name="watch_suffix" required="0" unique="0">
 <longdesc lang="en">
 Suffix (database backend) that will be monitored for availability. Multiple
 suffixes can be specified by providing a space seperated list. By providing one
@@ -139,7 +142,7 @@ will be monitored if left blank.
 <content type="string" default=""/>
 </parameter>
 
-<parameter name="ignore_suffix" required="0" unique="1">
+<parameter name="ignore_suffix" required="0" unique="0">
 <longdesc lang="en">
 Suffix (database backend) that will not be monitored for availability. Multiple
 suffixes can be specified by providing a space seperated list. No suffix will
@@ -149,20 +152,20 @@ be excluded if left blank.
 <content type="string" default=""/>
 </parameter>
 
-<parameter name="bind_dn" required="0" unique="1">
+<parameter name="bind_dn" required="0" unique="0">
 <longdesc lang="en">
-Distinguished Name used to bind to the LDAP directory. Leave blank to bind to
-the LDAP directory anonymously.
+Distinguished Name used to bind to the LDAP directory for testing. Leave blank
+to bind to the LDAP directory anonymously.
 </longdesc>
-<shortdesc>Distinguished Name used to bind to the LDAP directory.</shortdesc>
+<shortdesc>Distinguished Name used to bind to the LDAP directory for testing.</shortdesc>
 <content type="string" default=""/>
 </parameter>
 
-<parameter name="password" required="0" unique="1">
+<parameter name="password" required="0" unique="0">
 <longdesc lang="en">
-Password used to bind to the LDAP directory.
+Password used to bind to the LDAP directory for testing.
 </longdesc>
-<shortdesc>Password used to bind to the LDAP directory.</shortdesc>
+<shortdesc>Password used to bind to the LDAP directory for testing.</shortdesc>
 <content type="string" default=""/>
 </parameter>
 
@@ -171,10 +174,18 @@ Password used to bind to the LDAP directory.
 slapd may be called with additional parameters.
 Specify any of them here.
 </longdesc>
-<shortdesc lang="en"></shortdesc>
+<shortdesc lang="en">Any additional parameters to slapd.</shortdesc>
 <content type="string" default="" />
 </parameter>
 
+<parameter name="stop_escalate" unique="0" required="0">
+<longdesc lang="en">
+Number of seconds to wait for shutdown (using SIGTERM) before resorting to
+SIGKILL
+</longdesc>
+<shortdesc lang="en">Seconds before stop escalation to KILL</shortdesc>
+<content type="integer" default="30" />
+</parameter>
 </parameters>
 
 <actions>
@@ -192,30 +203,20 @@ terminate()
 {
   local pid=$1
   local signal=$2
-  local recheck=$3
+  local recheck=${3-0}
   local result
-
-  if [ -z "$recheck" ]; then
-    recheck=1
-  fi
+  local waited=0
 
   kill -$signal $pid >/dev/null 2>&1; result=$?
 
-  if [ $result -eq 0 ] && [ $recheck -gt 0 ]; then
-    # Grant some time for shutdown and recheck n times.
-    local i=0
+  while [ $result -eq 0 ] && [ $recheck -eq 0 ] || [ $waited -lt $recheck ]; do
+    kill -0 $pid >/dev/null 2>&1; result=$?
+    let "waited += 1"
 
-    while [ $result -eq 0 ] && [ $i -lt $recheck ]; do
-      kill -0 $pid >/dev/null 2>&1; result=$?
-      let "i += 1"
-
-      if [ $result -eq 0 ]; then
-        sleep 1
-      fi
-    done
-  else
-    result=1
-  fi
+    if [ $result -eq 0 ]; then
+      sleep 1
+    fi
+  done
 
   if [ $result -ne 0 ]; then
     return 0
@@ -267,17 +268,14 @@ slapd_pid()
 
 slapd_status()
 {
-  local pid
-  local state
-
-  pid=`slapd_pid`; state=$?
+  local pid=$1
+  local state=$?
 
   if [ $state -eq $OCF_SUCCESS ]; then
 
     if ! kill -0 $pid >/dev/null 2>&1; then
       return $OCF_NOT_RUNNING
     else
-      echo "$pid"
       return $OCF_SUCCESS
     fi
   fi
@@ -288,27 +286,25 @@ slapd_status()
 slapd_start()
 {
   local options
-  local pid
   local reason
   local result
   local state
 
-  pid=`slapd_status`; state=$?
+  slapd_status `slapd_pid`; state=$?
 
   if [ $state -eq $OCF_SUCCESS ]; then
     ocf_log info "slapd already running."
     return $state
   elif [ $state -eq $OCF_ERR_GENERIC ]; then
-    ocf_log err "slapd returned error."
     return $state
   fi
 
   options="-u $user -g $group"
 
-  if [ -d "$config_file" ]; then
-    options="$options -F $config_file"
+  if [ -d "$config" ]; then
+    options="$options -F $config"
   else
-    options="$options -f $config_file"
+    options="$options -f $config"
   fi
 
   if [ -n "$parameters" ]; then
@@ -338,26 +334,19 @@ slapd_stop()
   local result
   local state
 
-  pid=`slapd_status`; state=$?
+  pid=`slapd_pid`; slapd_status $pid; state=$?
 
   if [ $state -eq $OCF_NOT_RUNNING ]; then
     ocf_log info "slapd already stopped."
     return $OCF_SUCCESS
   elif [ $state -eq $OCF_ERR_GENERIC ]; then
-    ocf_log err "slapd returned error."
     return $state
   fi
 
-  terminate $pid 15 5; result=$?
+  terminate $pid TERM $OCF_RESKEY_stop_escalate; result=$?
   if [ $result -ne 0  ]; then
     ocf_log err "slapd failed to stop. Escalating to KILL."
-
-    terminate $pid 9 5; result=$?
-    if [ $result -ne 0 ]; then
-
-      ocf_log err "slapd failed to stop."
-      return $OCF_ERR_GENERIC
-    fi
+    terminate $pid KILL; result=$?
   fi
 
   if [ -f "$pid_file" ]; then
@@ -371,13 +360,12 @@ slapd_stop()
 slapd_monitor()
 {
   local options
-  local pid
   local result
   local state
   local suffix
   local suffixes
 
-  pid=`slapd_status`; state=$?
+  slapd_status `slapd_pid`; state=$?
   if [ $state -eq $OCF_NOT_RUNNING ]; then
     ocf_log debug "slapd is stopped."
     return $state
@@ -386,8 +374,8 @@ slapd_monitor()
     return $state
   fi
 
-  if [ -d "$config_file" ]; then
-    for suffix in `find "$config_file"/'cn=config' -type f -name olcDatabase* -exec \
+  if [ -d "$config" ]; then
+    for suffix in `find "$config"/'cn=config' -type f -name olcDatabase* -exec \
                    sed -ne 's/^[[:space:]]*olcSuffix:[[:space:]]\+\(.\+\)/\1/p' {} \;`
     do
       suffix=${suffix#\"*}
@@ -398,8 +386,8 @@ slapd_monitor()
       fi
     done
 
-  elif [ -f "$config_file" ]; then
-    for suffix in `sed -ne 's/^[[:space:]]*suffix[[:space:]]\+\(.\+\)/\1/p' "$config_file"`
+  elif [ -f "$config" ]; then
+    for suffix in `sed -ne 's/^[[:space:]]*suffix[[:space:]]\+\(.\+\)/\1/p' "$config"`
     do
       suffix=${suffix#\"*}
       suffix=${suffix%\"*}
@@ -417,14 +405,14 @@ slapd_monitor()
   fi
 
   for suffix in $suffixes; do
-    ocf_run ldapsearch -H "$services" -b "$suffix" $options >/dev/null 2>&1; result=$?
+    ocf_run "$ldapsearch" -H "$services" -b "$suffix" $options >/dev/null 2>&1; result=$?
 
     case "$result" in
       "0")
         ocf_log debug "slapd database with suffix '$suffix' reachable"
         ;;
       "49")
-        ocf_log err "slapd database with suffix '$suffic' unreachable. Invalid credentials."
+        ocf_log err "slapd database with suffix '$suffix' unreachable. Invalid credentials."
         return $OCF_ERR_CONFIGURED
         ;;
       *)
@@ -439,27 +427,32 @@ slapd_monitor()
 
 slapd_validate_all()
 {
-  if [ ! -x $slapd ]; then
-    ocf_log err "slapd binary '$slapd' does not exist or cannot be executed."
+  check_binary "$slapd"
+  check_binary "$ldapsearch"
+
+  if [ -d "$config" ]; then
+    pid_file=`sed -ne \
+	     's/^olcPidFile:[[:space:]]\+\(.\+\)[[:space:]]*/\1/p' \
+	     "$config"/'cn=config.ldif' 2>/dev/null`
+  elif [ -f "$config" ]; then
+    pid_file=`sed -ne \
+	      's/^pidfile[[:space:]]\+\(.\+\)/\1/p' \
+	      "$config" 2>/dev/null`
+  else
+    ocf_log err "slapd configuration file '$config' does not exist."
     return $OCF_ERR_INSTALLED
   fi
 
-  if [ ! -x $ldapsearch ]; then
-    ocf_log err "slapd binary '$ldapsearch' does not exist or cannot be executed."
+  if [ -z "$user" ]; then
+    user=`id -nu 2>/dev/null`
+  elif ! id "$user" >/dev/null 2>&1; then
+    ocf_log err "slapd user '$user' does not exist"
     return $OCF_ERR_INSTALLED
   fi
 
-  if [ ! -d $config_file ] && [ ! -f $config_file ]; then
-    ocf_log err "slapd configuration file '$config_file' does not exist."
-    return $OCF_ERR_INSTALLED
-  fi
-
-  if ! id "$user" >/dev/null 2>&1; then
-    ocf_log err "slapd user '$user' does not exist $ret"
-    return $OCF_ERR_INSTALLED
-  fi
-
-  if ! grep "^$group:" /etc/group >/dev/null 2>&1; then
+  if [ -z "$group" ]; then
+    group=`id -ng 2>/dev/null`
+  elif ! grep "^$group:" /etc/group >/dev/null 2>&1; then
     ocf_log err "slapd group '$group' does not exist"
     return $OCF_ERR_INSTALED
   fi
@@ -468,96 +461,12 @@ slapd_validate_all()
 }
 
 #
-# slapd_validate_dirs: retrieves all slapd database directories from the
-#                      configuration file(s) and verifies existence and
-#                      permissions.
-#
-slapd_validate_dirs()
-{
-  local dir
-  local dirs
-  local groups=`groups $user | sed -ne 's/^[^:]\+: \(.*\)$/\1/p' | sed 's/ \+/\\\|/' 2>/dev/null`
-  local perms
-  local result
-  local state
-
-
-  [ "$user" = "root" ] && return $OCF_SUCCESS
-
-  IFS=$NEWLINE
-
-  if [ -d "$config_file" ]; then
-    for dir in `find "$config_file"/'cn=config' -type f -name olcDatabase* -exec \
-                sed -ne 's/^olcDbDirectory:[[:space:]]\+\(.\+\)/\1/p' {} \;`
-    do
-      dir=${dir#\"*}
-      dir=${dir%\"*}
-      dirs="$dirs$NEWLINE$dir"
-    done
-  elif [ -f "$config_file" ]; then
-    for dir in `sed -ne 's/^directory[[:space:]]\+\(.\+\)/\1\n/p' "$config_file"`
-    do
-      dir=${dir#\"*}
-      dir=${dir%\"*}
-      dirs="$dirs$NEWLINE$dir"
-    done
-  fi
-
-  state=$OCF_SUCCESS
-
-  for dir in $dirs; do
-    IFS=$ORIG_IFS
-
-    perms=`stat -c "%U:%G:%a" "$dir"`; result=$?
-
-
-    if [ $result -eq 0 ]; then
-
-      echo "$perms" | grep "$user:[^:]\+:7.." >/dev/null 2>&1; result=$?
-
-      if [ $result -ne 0 ]; then
-
-        if [ -n "$groups" ]; then
-          echo "$perms" | grep "[^:]\+:\($group\|$groups\):.7." >/dev/null 2>&1; result=$?
-        else
-          echo "$perms" | grep "[^:]\+:$group:.7." >/dev/null 2>&1; result=$?
-        fi
-
-
-        if [ $result -ne 0 ]; then
-
-          echo "$perms" | grep ":..7" >/dev/null 2>&1; result=$?
-
-          if [ $result -ne 0 ]; then
-            state=$OCF_ERR_GENERIC
-            ocf_log err "slapd data directory '$dir' is not writable."
-          else
-            ocf_log warn "slapd data directory '$dir' is world writable. Mode 0700 recommended."
-          fi
-        else
-          ocf_log warn "slapd data directory '$dir' is group writable. Mode 0700 recommended."
-        fi
-
-      else
-        ocf_log warn "slapd data directory '$dir' is accessible by others. Mode 0700 recommended."
-      fi
-    fi
-
-    IFS=$NEWLINE
-  done
-
-  IFS=$ORIG_IFS
-
-  return $state
-}
-
-#
 # Main
 #
 
 slapd=$OCF_RESKEY_slapd
 ldapsearch=$OCF_RESKEY_ldapsearch
-config_file=$OCF_RESKEY_config_file
+config=$OCF_RESKEY_config
 user=$OCF_RESKEY_user
 group=$OCF_RESKEY_group
 services=$OCF_RESKEY_services
@@ -566,35 +475,12 @@ password=$OCF_RESKEY_password
 parameters=$OCF_RESKEY_parameters
 pid_file=''
 
-if [ -z "$config_file" ]; then
+if [ -z "$config" ]; then
   if [ -e "/etc/ldap/slapd.d" ]; then
-    config_file="/etc/ldap/slapd.d"
+    config="/etc/ldap/slapd.d"
   else
-    config_file="/etc/ldap/slapd.conf"
+    config="/etc/ldap/slapd.conf"
   fi
-fi
-
-if [ -d "$config_file" ]; then
-  pid_file=`sed -ne \
-           's/^olcPidFile:[[:space:]]\+\(.\+\)[[:space:]]*/\1/p' \
-           "$config_file"/'cn=config.ldif' 2>/dev/null`
-elif [ -f "$config_file" ]; then
-  pid_file=`sed -ne \
-            's/^pidfile[[:space:]]\+\(.\+\)/\1/p' \
-            "$config_file" 2>/dev/null`
-fi
-
-
-if test -z "$user"; then
-  user=`id -nu 2>/dev/null`
-elif ocf_is_decimal "$user"; then
-  user=`sed -ne "s/^\([^:]\+\):[^:]\+:$user:.*/\1/p" /etc/passwd 2>/dev/null`
-fi
-
-if test -z "$group"; then
-  group=`id -ng 2>/dev/null`
-elif ocf_is_decimal "$group"; then
-  group=`sed -ne "s/^\([^:]\+\):[^:]\+:$group:.*/\1/p" /etc/group 2>/dev/null`
 fi
 
 if [ $# -ne 1 ]; then
@@ -619,7 +505,7 @@ slapd_validate_all
 
 case $1 in
   status)
-    pid=`slapd_status`; state=$?
+    slapd_status `slapd_pid`; state=$?
 
     if [ $state -eq $OCF_SUCCESS ]; then
       ocf_log debug "slapd is running."
@@ -638,12 +524,11 @@ case $1 in
     exit $?
     ;;
   monitor)
-    pid=`slapd_monitor`; state=$?
+    slapd_monitor; state=$?
     exit $state
     ;;
   validate-all)
-    slapd_validate_dirs
-    exit $?
+    exit $OCF_SUCCESS
     ;;
   *)
     usage
