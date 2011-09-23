@@ -22,6 +22,7 @@
 #   OCF_RESKEY_slapd
 #   OCF_RESKEY_ldapsearch
 #   OCF_RESKEY_config
+#   OCF_RESKEY_pidfile
 #   OCF_RESKEY_user
 #   OCF_RESKEY_group
 #   OCF_RESKEY_services
@@ -42,6 +43,7 @@
 : ${OCF_RESKEY_slapd="/usr/sbin/slapd"}
 : ${OCF_RESKEY_ldapsearch="ldapsearch"}
 : ${OCF_RESKEY_config=""}
+: ${OCF_RESKEY_pidfile=""}
 : ${OCF_RESKEY_user=""}
 : ${OCF_RESKEY_group=""}
 : ${OCF_RESKEY_services="ldap:///"}
@@ -103,6 +105,14 @@ For example, "/etc/ldap/slapd.d" or "/etc/ldap/slapd.conf".
 </longdesc>
 <shortdesc>Full path to configuration directory or file</shortdesc>
 <content type="string" default=""/>
+</parameter>
+
+<parameter name="pidfile" required="0" unique="0">
+<longdesc lang="en">
+File to read the PID from; read from olcPidFile/pidfile in config if not set.
+</longdesc>
+<shortdesc lang="en">File to read PID from</shortdesc>
+<content type="string" default="" />
 </parameter>
 
 <parameter name="user" unique="0" required="0">
@@ -303,8 +313,11 @@ slapd_start()
 
   if [ -d "$config" ]; then
     options="$options -F $config"
-  else
+  elif [ -f "$config" ]; then
     options="$options -f $config"
+  else
+    ocf_log err "slapd configuration '$config' does not exist."
+    return $OCF_ERR_INSTALLED
   fi
 
   if [ -n "$parameters" ]; then
@@ -396,6 +409,10 @@ slapd_monitor()
         suffixes="$suffixes $suffix"
       fi
     done
+
+  else
+    ocf_log err "slapd configuration '$config' does not exist."
+    return $OCF_ERR_INSTALLED
   fi
 
   options="-LLL -s base -x"
@@ -430,17 +447,19 @@ slapd_validate_all()
   check_binary "$slapd"
   check_binary "$ldapsearch"
 
-  if [ -d "$config" ]; then
-    pid_file=`sed -ne \
-	     's/^olcPidFile:[[:space:]]\+\(.\+\)[[:space:]]*/\1/p' \
-	     "$config"/'cn=config.ldif' 2>/dev/null`
-  elif [ -f "$config" ]; then
-    pid_file=`sed -ne \
-	      's/^pidfile[[:space:]]\+\(.\+\)/\1/p' \
-	      "$config" 2>/dev/null`
-  else
-    ocf_log err "slapd configuration file '$config' does not exist."
-    return $OCF_ERR_INSTALLED
+  if [ -z "$pid_file" ]; then
+    if [ -d "$config" ]; then
+      pid_file=`sed -ne \
+	       's/^olcPidFile:[[:space:]]\+\(.\+\)[[:space:]]*/\1/p' \
+	       "$config"/'cn=config.ldif' 2>/dev/null`
+    elif [ -f "$config" ]; then
+      pid_file=`sed -ne \
+		's/^pidfile[[:space:]]\+\(.\+\)/\1/p' \
+		"$config" 2>/dev/null`
+    else
+      ocf_log err "slapd configuration '$config' does not exist."
+      return $OCF_ERR_INSTALLED
+    fi
   fi
 
   if [ -z "$user" ]; then
@@ -473,7 +492,7 @@ services=$OCF_RESKEY_services
 bind_dn=$OCF_RESKEY_bind_dn
 password=$OCF_RESKEY_password
 parameters=$OCF_RESKEY_parameters
-pid_file=''
+pid_file=$OCF_RESKEY_pidfile
 
 if [ -z "$config" ]; then
   if [ -e "/etc/ldap/slapd.d" ]; then
